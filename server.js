@@ -8,6 +8,17 @@ const os = require('os');
 const cors = require('cors');
 
 const execFileAsync = promisify(execFile);
+
+// Check if a command exists in PATH (for Linux/Render)
+async function commandExists(cmd) {
+  try {
+    await execFileAsync('which', [cmd]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const app = express();
 const upload = multer({ limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB limit
 const statsPath = '/tmp/stats.json';
