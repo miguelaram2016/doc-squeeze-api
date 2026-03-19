@@ -74,16 +74,15 @@ async function runQpdfCompress(input, output) {
 
 // Ghostscript compression - force JPEG recompression with DPI and quality control
 async function runGhostscriptRecompress(input, output, level) {
-  // For an 800px wide image displayed at 8.5" page width, effective DPI = 94
-  // All DPI values must be BELOW 94 to actually downscale
+  // Very low DPI values to ensure downsampling happens
   // Settings:
-  // high: 48 DPI, JPEG quality 25 - maximum compression
-  // medium: 72 DPI, JPEG quality 50 - balanced
-  // low: 90 DPI, JPEG quality 75 - minimum compression while still downscaling
+  // high: 36 DPI, JPEG quality 20 - maximum compression
+  // medium: 60 DPI, JPEG quality 40 - balanced
+  // low: 84 DPI, JPEG quality 60 - minimum compression while still downscaling
   const settings = {
-    high: { dpi: 48, quality: 25 },
-    medium: { dpi: 72, quality: 50 },
-    low: { dpi: 90, quality: 75 },
+    high: { dpi: 36, quality: 20 },
+    medium: { dpi: 60, quality: 40 },
+    low: { dpi: 84, quality: 60 },
   };
   const { dpi, quality } = settings[level] || settings.medium;
 
