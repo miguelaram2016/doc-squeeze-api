@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: doc-squeeze-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /
+    port: 3000
