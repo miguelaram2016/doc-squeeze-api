@@ -65,7 +65,7 @@ app.get('/api/stats', async (req, res) => {
 async function runQpdfCompress(input, output) {
   await execFileAsync('qpdf', [
     '--compress-streams=y',
-    '--recompress=flate',
+    '--compression-level=9',
     '--object-streams=generate',
     input,
     output,
