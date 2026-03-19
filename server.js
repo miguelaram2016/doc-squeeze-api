@@ -108,13 +108,12 @@ async function compressPdf(buffer, originalName, level) {
     const qpdfResult = await fs.readFile(qpdfPath);
     const qpdfSize = (await fs.stat(qpdfPath)).size;
 
-    // Step 2: ghostscript only for medium/high (aggressive image recompression)
-    // Skip for low quality (best quality, minimal compression)
-    // Skip entirely if qpdf output is already >= original (avoid inflating)
+    // Step 2: ghostscript for medium/high levels (aggressive image recompression)
+    // Run ghostscript if level is medium or high (even if qpdf didn't compress)
     let finalBuffer = qpdfResult;
     let finalSize = qpdfSize;
 
-    if (level !== 'low' && qpdfSize < buffer.length) {
+    if (level !== 'low') {
       try {
         await runGhostscriptRecompress(qpdfPath, gsPath, level);
         const gsSize = (await fs.stat(gsPath)).size;
