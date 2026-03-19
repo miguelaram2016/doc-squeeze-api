@@ -72,30 +72,29 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// ghostscript for image recompression
-// low=300 DPI (printer), medium=150 DPI (ebook), high=72 DPI (screen)
+// Ghostscript compression - force JPEG recompression at target quality
 async function runGhostscriptRecompress(input, output, level) {
-  const dpiMap = { low: 300, medium: 150, high: 72 };
-  const dpi = dpiMap[level] || 150;
-
-  // -dColorImageResolution forces images to be downsampled to this DPI before re-encoding
-  // -dColorImageDownsampleType=/Bicubic gives best quality at reduced size
-  // -dAutoFilterColorImages=false + -dColorImageFilter=/DCTEncode forces JPEG re-encoding
+  // Target DPI for each level
+  const dpi = level === 'high' ? 72 : level === 'medium' ? 120 : 200;
+  
+  // Force JPEG recompression with explicit settings
+  // -dColorImageResolution sets target DPI for color images
+  // -dAutoFilterColorImages=false disables auto filter selection  
+  // -dColorImageFilter=/DCTEncode forces JPEG encoding
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
-    '-dPDFSETTINGS=/prepress',
     `-dColorImageResolution=${dpi}`,
     `-dGrayImageResolution=${dpi}`,
-    '-dColorImageDownsampleType=/Bicubic',
-    '-dGrayImageDownsampleType=/Bicubic',
     '-dAutoFilterColorImages=false',
     '-dColorImageFilter=/DCTEncode',
-    '-dAutoFilterGrayImages=false',
+    '-dAutoFilterGrayImages=false', 
     '-dGrayImageFilter=/DCTEncode',
+    '-dEncodeColorImages=true',
+    '-dEncodeGrayImages=true',
     `-sOutputFile=${output}`,
     input,
   ]);
