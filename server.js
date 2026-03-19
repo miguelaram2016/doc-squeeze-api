@@ -72,27 +72,33 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// ghostscript for aggressive image recompression (high quality mode only)
+// ghostscript for image recompression
+// low=300 DPI (printer), medium=150 DPI (ebook), high=72 DPI (screen)
 async function runGhostscriptRecompress(input, output, level) {
-  const presetMap = {
-    low: '/printer',    // 300 DPI, high quality
-    medium: '/ebook',   // 150 DPI, balanced
-    high: '/screen',    // 72 DPI, max compression
-  };
-  const preset = presetMap[level] || '/ebook';
+  const dpiMap = { low: 300, medium: 150, high: 72 };
+  const dpi = dpiMap[level] || 150;
 
-  const gsArgs = [
+  // -dColorImageResolution forces images to be downsampled to this DPI before re-encoding
+  // -dColorImageDownsampleType=/Bicubic gives best quality at reduced size
+  // -dAutoFilterColorImages=false + -dColorImageFilter=/DCTEncode forces JPEG re-encoding
+  await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
-    `-dPDFSETTINGS=${preset}`,
+    '-dPDFSETTINGS=/prepress',
+    `-dColorImageResolution=${dpi}`,
+    `-dGrayImageResolution=${dpi}`,
+    '-dColorImageDownsampleType=/Bicubic',
+    '-dGrayImageDownsampleType=/Bicubic',
+    '-dAutoFilterColorImages=false',
+    '-dColorImageFilter=/DCTEncode',
+    '-dAutoFilterGrayImages=false',
+    '-dGrayImageFilter=/DCTEncode',
     `-sOutputFile=${output}`,
     input,
-  ];
-
-  await execFileAsync('gs', gsArgs);
+  ]);
 }
 
 // Compress a PDF buffer — returns { buffer, size }
