@@ -72,21 +72,43 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// Ghostscript compression - minimal working approach
+// Ghostscript compression - force JPEG recompression with DPI and quality control
 async function runGhostscriptRecompress(input, output, level) {
-  // Use /screen preset for high compression (targets 72 DPI)
-  // This is the most reliable ghostscript compression setting
-  const preset = level === 'high' ? '/screen' : level === 'medium' ? '/ebook' : '/printer';
-  
+  // Settings for each level:
+  // high: 72 DPI, JPEG quality 30 - smallest file, visible quality loss
+  // medium: 110 DPI, JPEG quality 55 - balanced
+  // low: 180 DPI, JPEG quality 80 - best quality, larger files
+  const settings = {
+    high: { dpi: 72, quality: 30 },
+    medium: { dpi: 110, quality: 55 },
+    low: { dpi: 180, quality: 80 },
+  };
+  const { dpi, quality } = settings[level] || settings.medium;
+
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
-    '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
-    `-dPDFSETTINGS=${preset}`,
+    '-dCompatibilityLevel=1.4',
+    // Force image recompression
+    '-dAutoFilterColorImages=false',
+    '-dAutoFilterGrayImages=false',
+    '-dColorImageFilter=/DCTEncode',
+    '-dGrayImageFilter=/DCTEncode',
     '-dEncodeColorImages=true',
     '-dEncodeGrayImages=true',
+    // Quality and DPI settings
+    `-dJPEGQ=${quality}`,
+    `-dColorImageResolution=${dpi}`,
+    `-dGrayImageResolution=${dpi}`,
+    '-dColorImageDownsampleType=/Average',
+    '-dGrayImageDownsampleType=/Average',
+    '-dDownsampleColorImages=true',
+    '-dDownsampleGrayImages=true',
+    // Preserve text as vectors
+    '-dTextAlphaBits=4',
+    '-dGraphicsAlphaBits=4',
     `-sOutputFile=${output}`,
     input,
   ]);
