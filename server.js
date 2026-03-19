@@ -72,17 +72,15 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// Ghostscript compression - force JPEG recompression with DPI and quality control
+// Ghostscript compression - use settings that work
 async function runGhostscriptRecompress(input, output, level) {
-  // Very low DPI values to ensure downsampling happens
-  // Settings:
-  // high: 36 DPI, JPEG quality 20 - maximum compression
-  // medium: 60 DPI, JPEG quality 40 - balanced
-  // low: 84 DPI, JPEG quality 60 - minimum compression while still downscaling
+  // The key insight: for 800px images at 94 DPI effective, only 72 DPI or lower triggers downsampling
+  // Settings that worked: high at 72 DPI gave 68% reduction
+  // Different DPI values for differentiation: 96/72/48
   const settings = {
-    high: { dpi: 36, quality: 20 },
-    medium: { dpi: 60, quality: 40 },
-    low: { dpi: 84, quality: 60 },
+    high: { dpi: 48, quality: 25 },
+    medium: { dpi: 72, quality: 40 },
+    low: { dpi: 96, quality: 60 },
   };
   const { dpi, quality } = settings[level] || settings.medium;
 
