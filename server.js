@@ -113,15 +113,20 @@ async function compressPdf(buffer, originalName, level) {
 
     if (level !== 'low') {
       try {
+        console.log(`Running ghostscript for ${originalName}, level=${level}, qpdfSize=${qpdfSize}`);
         await runGhostscriptRecompress(qpdfPath, gsPath, level);
         const gsSize = (await fs.stat(gsPath)).size;
+        console.log(`Ghostscript done: qpdfSize=${qpdfSize}, gsSize=${gsSize}`);
         // Only use gs output if it's actually smaller than qpdf output
         if (gsSize < qpdfSize) {
+          console.log(`Using ghostscript output (smaller)`);
           finalBuffer = await fs.readFile(gsPath);
           finalSize = gsSize;
+        } else {
+          console.log(`Keeping qpdf output (ghostscript not smaller)`);
         }
       } catch (gsErr) {
-        console.warn(`Ghostscript failed for ${originalName}, using qpdf only:`, gsErr.message);
+        console.error(`Ghostscript FAILED for ${originalName}:`, gsErr.message);
       }
     }
 
