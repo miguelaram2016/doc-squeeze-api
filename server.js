@@ -72,12 +72,13 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// Ghostscript compression - use /screen preset and set explicit raster resolution via -r
+// Ghostscript compression - use appropriate preset for each quality level
 async function runGhostscriptRecompress(input, output, level) {
-  // DPI values must be <= 94 to trigger downsampling.
-  const dpiMap = { high: 48, medium: 72, low: 84 };
-  const dpi = dpiMap[level] || 72;
-  const preset = '/screen';
+  // DPI values: 150 for high quality, 100 for medium, 72 for aggressive compression
+  const dpiMap = { low: 150, medium: 100, high: 72 };
+  const presetMap = { low: '/prepress', medium: '/printer', high: '/ebook' };
+  const dpi = dpiMap[level] || 100;
+  const preset = presetMap[level] || '/printer';
   // Use -r to set raster resolution (applies to image downsampling)
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
@@ -114,12 +115,12 @@ async function compressPdf(buffer, originalName, level) {
     const qpdfResult = await fs.readFile(qpdfPath);
     const qpdfSize = (await fs.stat(qpdfPath)).size;
 
-    // Step 2: ghostscript for medium/high levels (aggressive image recompression)
-    // Run ghostscript if level is medium or high (even if qpdf didn't compress)
+    // Step 2: ghostscript for all levels (each level uses a different quality preset)
+    // low=/prepress (best quality), medium=/printer, high=/ebook (most compression)
     let finalBuffer = qpdfResult;
     let finalSize = qpdfSize;
 
-    if (level !== 'low') {
+    {
       try {
         console.log(`Running ghostscript for ${originalName}, level=${level}, qpdfSize=${qpdfSize}`);
         await runGhostscriptRecompress(qpdfPath, gsPath, level);
