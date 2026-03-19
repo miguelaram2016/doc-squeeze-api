@@ -72,31 +72,17 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// Ghostscript compression - use settings that WORK
+// Ghostscript compression - EXACT working config that gave 68%
 async function runGhostscriptRecompress(input, output, level) {
-  // KEY: 800px images at ~94 DPI effective - only DPI <=72 triggers downsampling!
-  // high: 72 DPI, q=30 -> was giving 68%!
-  // Use same DPI but different quality for differentiation
-  const settings = {
-    high: { dpi: 72, quality: 30 },   // 72 DPI, q30 - gives max compression
-    medium: { dpi: 72, quality: 50 },  // 72 DPI, q50 - balanced
-    low: { dpi: 72, quality: 70 },    // 72 DPI, q70 - best quality
-  };
-  const { dpi, quality } = settings[level] || settings.medium;
-
-  // Use PDFSETTINGS preset which was working before!
   const preset = level === 'high' ? '/screen' : level === 'medium' ? '/ebook' : '/printer';
   
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
+    '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
-    '-dCompatibilityLevel=1.4',
-    // PDFSETTINGS preset - this was key for compression!
     `-dPDFSETTINGS=${preset}`,
-    // Also try explicit quality settings for differentiation
-    `-dJPEGQ=${quality}`,
     '-dEncodeColorImages=true',
     '-dEncodeGrayImages=true',
     `-sOutputFile=${output}`,
