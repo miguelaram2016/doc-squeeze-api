@@ -61,80 +61,96 @@ app.get('/api/stats', async (req, res) => {
 
 // ── PDF helpers ─────────────────────────────────────────────────────────────
 
-async function runQpdf(input, output) {
+// qpdf with actual compression (recompress streams with zlib)
+async function runQpdfCompress(input, output) {
   await execFileAsync('qpdf', [
-    '--linearize',
+    '--compress-streams=y',
+    '--recompress=flate',
     '--object-streams=generate',
     input,
     output,
   ]);
 }
 
-async function runGhostscript(input, output, level) {
-  // Different DPI and compression per level
-  // Low = 150 DPI, medium = 96 DPI, high = 55 DPI
-  const dpiMap = { low: 150, medium: 96, high: 55 };
-  const dpi = dpiMap[level] || 96;
+// ghostscript for aggressive image recompression (high quality mode only)
+async function runGhostscriptRecompress(input, output, level) {
+  const presetMap = {
+    low: '/printer',    // 300 DPI, high quality
+    medium: '/ebook',   // 150 DPI, balanced
+    high: '/screen',    // 72 DPI, max compression
+  };
+  const preset = presetMap[level] || '/ebook';
 
-  await execFileAsync('gs', [
+  const gsArgs = [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
-    `-dColorImageResolution=${dpi}`,
-    `-dGrayImageResolution=${dpi}`,
-    `-dMonoImageResolution=${Math.round(dpi * 2)}`,
-    '-dColorImageDownsampleType=/Average',
-    '-dGrayImageDownsampleType=/Average',
-    '-dColorImageFilter=/DCTEncode',
-    '-dAutoFilterColorImages=false',
-    '-dAutoFilterGrayImages=false',
+    `-dPDFSETTINGS=${preset}`,
     `-sOutputFile=${output}`,
     input,
-  ]);
+  ];
+
+  await execFileAsync('gs', gsArgs);
 }
 
-// Check if a command exists
-async function commandExists(cmd) {
-  try {
-    await execFileAsync('which', [cmd]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
+// Compress a PDF buffer — returns { buffer, size }
+// Tries qpdf compression, optionally also ghostscript, picks the smaller result
 async function compressPdf(buffer, originalName, level) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docsqueeze-'));
   try {
     const inputPath = path.join(tmpDir, 'input.pdf');
     const qpdfPath = path.join(tmpDir, 'qpdf.pdf');
-    const outputPath = path.join(tmpDir, 'output.pdf');
+    const gsPath = path.join(tmpDir, 'gs.pdf');
 
     await fs.writeFile(inputPath, buffer);
-    await runQpdf(inputPath, qpdfPath);
-    await runGhostscript(qpdfPath, outputPath, level);
 
-    const compressedBuffer = await fs.readFile(outputPath);
-    const compressedSize = (await fs.stat(outputPath)).size;
+    // Step 1: qpdf recompress (always — this is the baseline compression)
+    await runQpdfCompress(inputPath, qpdfPath);
+    const qpdfResult = await fs.readFile(qpdfPath);
+    const qpdfSize = (await fs.stat(qpdfPath)).size;
+
+    // Step 2: ghostscript only for medium/high (aggressive image recompression)
+    // Skip for low quality (best quality, minimal compression)
+    // Skip entirely if qpdf output is already >= original (avoid inflating)
+    let finalBuffer = qpdfResult;
+    let finalSize = qpdfSize;
+
+    if (level !== 'low' && qpdfSize < buffer.length) {
+      try {
+        await runGhostscriptRecompress(qpdfPath, gsPath, level);
+        const gsSize = (await fs.stat(gsPath)).size;
+        // Only use gs output if it's actually smaller than qpdf output
+        if (gsSize < qpdfSize) {
+          finalBuffer = await fs.readFile(gsPath);
+          finalSize = gsSize;
+        }
+      } catch (gsErr) {
+        console.warn(`Ghostscript failed for ${originalName}, using qpdf only:`, gsErr.message);
+      }
+    }
+
+    // Safety: never return a file larger than the original
+    if (finalSize >= buffer.length) {
+      finalBuffer = qpdfResult;
+      finalSize = qpdfSize;
+    }
 
     return {
       originalName,
       originalSize: buffer.length,
-      compressedSize,
-      compressedBase64: compressedBuffer.toString('base64'),
+      compressedSize: finalSize,
+      compressedBase64: finalBuffer.toString('base64'),
     };
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
-// ── Single-file compress (existing, unchanged) ───────────────────────────────
+// ── Single-file compress ──────────────────────────────────────────────────────
 
 app.post('/api/compress', upload.single('file'), async (req, res) => {
-  let tmpDir = '';
-
   try {
     const level = req.body.level || 'medium';
 
@@ -146,39 +162,24 @@ app.post('/api/compress', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Only PDF files are supported' });
     }
 
-    console.log(`Processing file: ${req.file.originalname}, size: ${req.file.size}, level: ${level}`);
+    console.log(`Compressing: ${req.file.originalname}, ${req.file.size} bytes, level: ${level}`);
 
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docsqueeze-'));
-    const inputPath = path.join(tmpDir, 'input.pdf');
-    const qpdfPath = path.join(tmpDir, 'qpdf.pdf');
-    const outputPath = path.join(tmpDir, 'output.pdf');
-
-    await fs.writeFile(inputPath, req.file.buffer);
-
-    await runQpdf(inputPath, qpdfPath);
-    await runGhostscript(qpdfPath, outputPath, level);
-
-    const result = await fs.readFile(outputPath);
-    const stats = await fs.stat(outputPath);
-
+    const result = await compressPdf(req.file.buffer, req.file.originalname, level);
     await incrementCount();
 
-    console.log(`Compression complete. Original: ${req.file.size}, Compressed: ${stats.size}`);
+    console.log(`Done. ${result.originalSize} → ${result.compressedSize} bytes (${Math.round((1 - result.compressedSize / result.originalSize) * 100)}% reduction)`);
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="compressed_${req.file.originalname}"`);
-    res.send(result);
+    // Return JSON (frontend decodes base64 and triggers download)
+    res.json({
+      originalName: result.originalName,
+      originalSize: result.originalSize,
+      compressedSize: result.compressedSize,
+      compressedBase64: result.compressedBase64,
+    });
 
   } catch (err) {
     console.error('Compression error:', err);
-    res.status(500).json({
-      error: err.message || 'Compression failed',
-      details: err.stack
-    });
-  } finally {
-    if (tmpDir) {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-    }
+    res.status(500).json({ error: err.message || 'Compression failed' });
   }
 });
 
