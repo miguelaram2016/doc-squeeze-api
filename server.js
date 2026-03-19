@@ -72,27 +72,19 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// Ghostscript compression - force JPEG recompression at target quality
+// Ghostscript compression - minimal working approach
 async function runGhostscriptRecompress(input, output, level) {
-  // Target DPI for each level
-  const dpi = level === 'high' ? 72 : level === 'medium' ? 120 : 200;
+  // Use /screen preset for high compression (targets 72 DPI)
+  // This is the most reliable ghostscript compression setting
+  const preset = level === 'high' ? '/screen' : level === 'medium' ? '/ebook' : '/printer';
   
-  // Force JPEG recompression with explicit settings
-  // -dColorImageResolution sets target DPI for color images
-  // -dAutoFilterColorImages=false disables auto filter selection  
-  // -dColorImageFilter=/DCTEncode forces JPEG encoding
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
-    `-dColorImageResolution=${dpi}`,
-    `-dGrayImageResolution=${dpi}`,
-    '-dAutoFilterColorImages=false',
-    '-dColorImageFilter=/DCTEncode',
-    '-dAutoFilterGrayImages=false', 
-    '-dGrayImageFilter=/DCTEncode',
+    `-dPDFSETTINGS=${preset}`,
     '-dEncodeColorImages=true',
     '-dEncodeGrayImages=true',
     `-sOutputFile=${output}`,
