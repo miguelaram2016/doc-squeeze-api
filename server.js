@@ -72,15 +72,15 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// Ghostscript compression - use settings that work
+// Ghostscript compression - use settings that WORK
 async function runGhostscriptRecompress(input, output, level) {
-  // The key insight: for 800px images at 94 DPI effective, only 72 DPI or lower triggers downsampling
-  // Settings that worked: high at 72 DPI gave 68% reduction
-  // Different DPI values for differentiation: 96/72/48
+  // KEY: 800px images at ~94 DPI effective - only DPI <=72 triggers downsampling!
+  // high: 72 DPI, q=30 -> was giving 68%!
+  // Use same DPI but different quality for differentiation
   const settings = {
-    high: { dpi: 48, quality: 25 },
-    medium: { dpi: 72, quality: 40 },
-    low: { dpi: 96, quality: 60 },
+    high: { dpi: 72, quality: 30 },   // 72 DPI, q30 - gives max compression
+    medium: { dpi: 72, quality: 50 },  // 72 DPI, q50 - balanced
+    low: { dpi: 72, quality: 70 },    // 72 DPI, q70 - best quality
   };
   const { dpi, quality } = settings[level] || settings.medium;
 
