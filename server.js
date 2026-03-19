@@ -72,18 +72,13 @@ async function runQpdfCompress(input, output) {
   ]);
 }
 
-// Ghostscript compression - differentiate by using explicit DPI below 94
+// Ghostscript compression - use /screen preset and set explicit raster resolution via -r
 async function runGhostscriptRecompress(input, output, level) {
-  // For JPEG images at ~94 DPI effective, we need DPI <= 94 to trigger downsampling
-  // Settings:
-  // high: 60 DPI -> max compression  
-  // medium: 80 DPI -> medium compression
-  // low: 95 DPI -> minimal compression (just below threshold)
-  const dpiMap = { high: 60, medium: 80, low: 95 };
-  const dpi = dpiMap[level] || 80;
-  
-  const preset = level === 'high' ? '/screen' : level === 'medium' ? '/ebook' : '/printer';
-  
+  // DPI values must be <= 94 to trigger downsampling.
+  const dpiMap = { high: 48, medium: 72, low: 84 };
+  const dpi = dpiMap[level] || 72;
+  const preset = '/screen';
+  // Use -r to set raster resolution (applies to image downsampling)
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
@@ -91,9 +86,7 @@ async function runGhostscriptRecompress(input, output, level) {
     '-dQUIET',
     '-dBATCH',
     `-dPDFSETTINGS=${preset}`,
-    // Force resolution below effective ~94 DPI to trigger downsampling
-    `-dColorImageResolution=${dpi}`,
-    `-dGrayImageResolution=${dpi}`,
+    `-r${dpi}`,
     '-dDownsampleColorImages=true',
     '-dDownsampleGrayImages=true',
     '-dColorImageDownsampleType=/Average',
