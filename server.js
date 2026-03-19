@@ -71,21 +71,25 @@ async function runQpdf(input, output) {
 }
 
 async function runGhostscript(input, output, level) {
-  const qualityMap = {
-    low: '/printer',
-    medium: '/ebook',
-    high: '/screen',
-  };
-
-  const quality = qualityMap[level] || '/ebook';
+  // Different DPI and compression per level
+  // Low = 150 DPI, medium = 96 DPI, high = 55 DPI
+  const dpiMap = { low: 150, medium: 96, high: 55 };
+  const dpi = dpiMap[level] || 96;
 
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
-    `-dPDFSETTINGS=${quality}`,
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
+    `-dColorImageResolution=${dpi}`,
+    `-dGrayImageResolution=${dpi}`,
+    `-dMonoImageResolution=${Math.round(dpi * 2)}`,
+    '-dColorImageDownsampleType=/Average',
+    '-dGrayImageDownsampleType=/Average',
+    '-dColorImageFilter=/DCTEncode',
+    '-dAutoFilterColorImages=false',
+    '-dAutoFilterGrayImages=false',
     `-sOutputFile=${output}`,
     input,
   ]);
