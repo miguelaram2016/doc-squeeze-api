@@ -84,30 +84,21 @@ async function runGhostscriptRecompress(input, output, level) {
   };
   const { dpi, quality } = settings[level] || settings.medium;
 
+  // Use PDFSETTINGS preset which was working before!
+  const preset = level === 'high' ? '/screen' : level === 'medium' ? '/ebook' : '/printer';
+  
   await execFileAsync('gs', [
     '-sDEVICE=pdfwrite',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
     '-dCompatibilityLevel=1.4',
-    // Force image recompression
-    '-dAutoFilterColorImages=false',
-    '-dAutoFilterGrayImages=false',
-    '-dColorImageFilter=/DCTEncode',
-    '-dGrayImageFilter=/DCTEncode',
+    // PDFSETTINGS preset - this was key for compression!
+    `-dPDFSETTINGS=${preset}`,
+    // Also try explicit quality settings for differentiation
+    `-dJPEGQ=${quality}`,
     '-dEncodeColorImages=true',
     '-dEncodeGrayImages=true',
-    // Quality and DPI settings
-    `-dJPEGQ=${quality}`,
-    `-dColorImageResolution=${dpi}`,
-    `-dGrayImageResolution=${dpi}`,
-    '-dColorImageDownsampleType=/Average',
-    '-dGrayImageDownsampleType=/Average',
-    '-dDownsampleColorImages=true',
-    '-dDownsampleGrayImages=true',
-    // Preserve text as vectors
-    '-dTextAlphaBits=4',
-    '-dGraphicsAlphaBits=4',
     `-sOutputFile=${output}`,
     input,
   ]);
