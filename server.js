@@ -102,8 +102,9 @@ async function runGhostscriptRecompress(input, output, level) {
   };
   const dpi = dpiMap[level] || 72;
   const preset = presetMap[level] || '/ebook';
-  // Use -r to set raster resolution (applies to image downsampling)
-  await execFileAsync('gs', [
+  
+  // Build Ghostscript arguments based on level
+  const gsArgs = [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
@@ -113,13 +114,33 @@ async function runGhostscriptRecompress(input, output, level) {
     `-r${dpi}`,
     '-dDownsampleColorImages=true',
     '-dDownsampleGrayImages=true',
+    '-dDownsampleMonoImages=true',
+    '-dMonoImageResolution=150',
     '-dColorImageDownsampleType=/Average',
     '-dGrayImageDownsampleType=/Average',
+    '-dMonoImageDownsampleType=/Average',
     '-dEncodeColorImages=true',
     '-dEncodeGrayImages=true',
-    `-sOutputFile=${output}`,
-    input,
-  ]);
+    '-dEncodeMonoImages=true',
+    '-dCompressFonts=true',
+    '-dCompressPages=true',
+  ];
+  
+  // Ultra mode: extra aggressive settings
+  if (level === 'ultra') {
+    gsArgs.push(
+      '-dAutoFilterColorImages=true',
+      '-dAutoFilterGrayImages=true',
+      '-dColorImageFilter=/DCTEncode',  // JPEG compression for color
+      '-dGrayImageFilter=/DCTEncode',    // JPEG compression for gray
+      '-dPresetClip=true',
+      '-dUseFlateCompression=true',
+    );
+  }
+  
+  gsArgs.push(`-sOutputFile=${output}`, input);
+  
+  await execFileAsync('gs', gsArgs);
 }
 
 // Compress a PDF buffer — returns { buffer, size }
