@@ -80,12 +80,9 @@ async function runQpdfCompress(input, output, level = 'medium') {
     '--object-streams=generate',
   ];
   
-  // Ultra mode: extra optimization (strip metadata, flatten, etc.)
+  // Ultra mode: extra optimization
   if (level === 'ultra') {
     qpdfArgs.push(
-      '--strip-xref',
-      '--compress-streams=y:zlib',
-      '--qdf',
       '--linearize',
     );
   }
@@ -170,12 +167,12 @@ async function compressPdf(buffer, originalName, level) {
     const qpdfResult = await fs.readFile(qpdfPath);
     const qpdfSize = (await fs.stat(qpdfPath)).size;
 
-    // Step 2: ghostscript for all levels (each level uses a different quality preset)
-    // ultra (screen/36dpi) to minimal (prepress/150dpi)
+    // Step 2: ghostscript for higher compression levels only (ultra, high, medium)
+    // Low and minimal quality levels skip ghostscript and use qpdf output only
     let finalBuffer = qpdfResult;
     let finalSize = qpdfSize;
 
-    {
+    if (['ultra', 'high', 'medium'].includes(level)) {
       try {
         console.log(`Running ghostscript for ${originalName}, level=${level}, qpdfSize=${qpdfSize}`);
         await runGhostscriptRecompress(qpdfPath, gsPath, level);
@@ -192,6 +189,8 @@ async function compressPdf(buffer, originalName, level) {
       } catch (gsErr) {
         console.error(`Ghostscript FAILED for ${originalName}:`, gsErr.message);
       }
+    } else {
+      console.log(`Skipping ghostscript for ${level} level (using qpdf output only)`);
     }
 
     // Safety: never return a file larger than the original
