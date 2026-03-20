@@ -284,11 +284,15 @@ app.post('/api/merge', upload.array('files', 20), async (req, res) => {
     const outputPath = path.join(tmpDir, 'merged.pdf');
 
     // Prefer pdfunite (poppler-utils), fall back to ghostscript
-    const hasPdfunite = await commandExists('pdfunite');
-
-    if (hasPdfunite) {
+    let mergedWithPdfunite = false;
+    try {
       await execFileAsync('pdfunite', [...inputPaths, outputPath]);
-    } else {
+      mergedWithPdfunite = true;
+    } catch (pdfuniteErr) {
+      console.log(`pdfunite failed, trying ghostscript: ${pdfuniteErr.message}`);
+    }
+
+    if (!mergedWithPdfunite) {
       // Ghostscript merge fallback
       const gsArgs = [
         '-dBATCH',
