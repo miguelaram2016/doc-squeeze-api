@@ -94,24 +94,19 @@ async function runQpdfCompress(input, output, level = 'medium') {
 // Ghostscript compression - 5 levels with appropriate compression ratios
 async function runGhostscriptRecompress(input, output, level) {
   // 5 levels: ultra (most compression) to minimal (best quality)
-  const dpiMap = {
-    ultra: 36,    // Maximum compression - very small files, low quality
-    high: 48,     // High compression - small files, acceptable quality
-    medium: 72,   // Balanced - medium files, good quality
-    low: 120,     // Low compression - larger files, high quality
-    minimal: 150  // Best quality - largest files, highest quality
+  const settings = {
+    ultra: { dpi: 36, preset: '/screen', desc: 'Maximum compression' },
+    high: { dpi: 48, preset: '/ebook', desc: 'High compression' },
+    medium: { dpi: 72, preset: '/printer', desc: 'Balanced' },
+    low: { dpi: 96, preset: '/printer', desc: 'Low compression' },
+    minimal: { dpi: 150, preset: '/prepress', desc: 'Best quality' }
   };
-  const presetMap = {
-    ultra: '/screen',
-    high: '/ebook',
-    medium: '/printer',
-    low: '/printer',
-    minimal: '/prepress'
-  };
-  const dpi = dpiMap[level] || 72;
-  const preset = presetMap[level] || '/ebook';
   
-  // Build Ghostscript arguments based on level
+  const cfg = settings[level] || settings.medium;
+  const dpi = cfg.dpi;
+  const preset = cfg.preset;
+  
+  // Build Ghostscript arguments
   const gsArgs = [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
@@ -120,29 +115,27 @@ async function runGhostscriptRecompress(input, output, level) {
     '-dBATCH',
     `-dPDFSETTINGS=${preset}`,
     `-r${dpi}`,
-    '-dDownsampleColorImages=true',
-    '-dDownsampleGrayImages=true',
-    '-dDownsampleMonoImages=true',
-    '-dMonoImageResolution=150',
-    '-dColorImageDownsampleType=/Average',
-    '-dGrayImageDownsampleType=/Average',
-    '-dMonoImageDownsampleType=/Average',
-    '-dEncodeColorImages=true',
-    '-dEncodeGrayImages=true',
-    '-dEncodeMonoImages=true',
-    '-dCompressFonts=true',
-    '-dCompressPages=true',
   ];
   
-  // Ultra mode: extra aggressive settings
+  // Add downsampling for all levels except minimal
+  if (level !== 'minimal') {
+    gsArgs.push(
+      '-dDownsampleColorImages=true',
+      '-dDownsampleGrayImages=true',
+      '-dDownsampleMonoImages=true',
+      '-dColorImageDownsampleType=/Bicubic',
+      '-dGrayImageDownsampleType=/Bicubic',
+      '-dMonoImageDownsampleType=/Bicubic',
+    );
+  }
+  
+  // Ultra: extra aggressive JPEG compression
   if (level === 'ultra') {
     gsArgs.push(
       '-dAutoFilterColorImages=true',
       '-dAutoFilterGrayImages=true',
-      '-dColorImageFilter=/DCTEncode',  // JPEG compression for color
-      '-dGrayImageFilter=/DCTEncode',    // JPEG compression for gray
-      '-dPresetClip=true',
-      '-dUseFlateCompression=true',
+      '-dColorImageFilter=/DCTEncode',
+      '-dGrayImageFilter=/DCTEncode',
     );
   }
   
@@ -167,30 +160,25 @@ async function compressPdf(buffer, originalName, level) {
     const qpdfResult = await fs.readFile(qpdfPath);
     const qpdfSize = (await fs.stat(qpdfPath)).size;
 
-    // Step 2: ghostscript for higher compression levels only (ultra, high, medium)
-    // Low and minimal quality levels skip ghostscript and use qpdf output only
+    // Step 2: ghostscript for all levels (each level uses different quality settings)
     let finalBuffer = qpdfResult;
     let finalSize = qpdfSize;
 
-    if (['ultra', 'high', 'medium'].includes(level)) {
-      try {
-        console.log(`Running ghostscript for ${originalName}, level=${level}, qpdfSize=${qpdfSize}`);
-        await runGhostscriptRecompress(qpdfPath, gsPath, level);
-        const gsSize = (await fs.stat(gsPath)).size;
-        console.log(`Ghostscript done: qpdfSize=${qpdfSize}, gsSize=${gsSize}`);
-        // Only use gs output if it's actually smaller than qpdf output
-        if (gsSize < qpdfSize) {
-          console.log(`Using ghostscript output (smaller)`);
-          finalBuffer = await fs.readFile(gsPath);
-          finalSize = gsSize;
-        } else {
-          console.log(`Keeping qpdf output (ghostscript not smaller)`);
-        }
-      } catch (gsErr) {
-        console.error(`Ghostscript FAILED for ${originalName}:`, gsErr.message);
+    try {
+      console.log(`Running ghostscript for ${originalName}, level=${level}, qpdfSize=${qpdfSize}`);
+      await runGhostscriptRecompress(qpdfPath, gsPath, level);
+      const gsSize = (await fs.stat(gsPath)).size;
+      console.log(`Ghostscript done: qpdfSize=${qpdfSize}, gsSize=${gsSize}`);
+      // Only use gs output if it's actually smaller than qpdf output
+      if (gsSize < qpdfSize) {
+        console.log(`Using ghostscript output (smaller)`);
+        finalBuffer = await fs.readFile(gsPath);
+        finalSize = gsSize;
+      } else {
+        console.log(`Keeping qpdf output (ghostscript not smaller)`);
       }
-    } else {
-      console.log(`Skipping ghostscript for ${level} level (using qpdf output only)`);
+    } catch (gsErr) {
+      console.error(`Ghostscript FAILED for ${originalName}:`, gsErr.message);
     }
 
     // Safety: never return a file larger than the original
