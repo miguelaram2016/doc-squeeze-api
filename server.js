@@ -73,14 +73,25 @@ app.get('/api/stats', async (req, res) => {
 // ── PDF helpers ─────────────────────────────────────────────────────────────
 
 // qpdf with actual compression (recompress streams with zlib)
-async function runQpdfCompress(input, output) {
-  await execFileAsync('qpdf', [
+async function runQpdfCompress(input, output, level = 'medium') {
+  const qpdfArgs = [
     '--compress-streams=y',
     '--compression-level=9',
     '--object-streams=generate',
-    input,
-    output,
-  ]);
+  ];
+  
+  // Ultra mode: extra optimization (strip metadata, flatten, etc.)
+  if (level === 'ultra') {
+    qpdfArgs.push(
+      '--strip-xref',
+      '--compress-streams=y:zlib',
+      '--qdf',
+      '--linearize',
+    );
+  }
+  
+  qpdfArgs.push(input, output);
+  await execFileAsync('qpdf', qpdfArgs);
 }
 
 // Ghostscript compression - 5 levels with appropriate compression ratios
@@ -155,7 +166,7 @@ async function compressPdf(buffer, originalName, level) {
     await fs.writeFile(inputPath, buffer);
 
     // Step 1: qpdf recompress (always — this is the baseline compression)
-    await runQpdfCompress(inputPath, qpdfPath);
+    await runQpdfCompress(inputPath, qpdfPath, level);
     const qpdfResult = await fs.readFile(qpdfPath);
     const qpdfSize = (await fs.stat(qpdfPath)).size;
 
