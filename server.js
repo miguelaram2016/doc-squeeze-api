@@ -283,17 +283,32 @@ app.post('/api/merge', upload.array('files', 20), async (req, res) => {
 
     const outputPath = path.join(tmpDir, 'merged.pdf');
 
-    // Prefer pdfunite (poppler-utils), fall back to ghostscript
-    let mergedWithPdfunite = false;
+    // Try qpdf first (most reliable), then pdfunite, then ghostscript
+    let mergeSuccess = false;
+    
+    // Try qpdf --pages (most reliable)
     try {
-      await execFileAsync('pdfunite', [...inputPaths, outputPath]);
-      mergedWithPdfunite = true;
-    } catch (pdfuniteErr) {
-      console.log(`pdfunite failed, trying ghostscript: ${pdfuniteErr.message}`);
+      await execFileAsync('qpdf', ['--pages', ...inputPaths, '--', outputPath]);
+      mergeSuccess = true;
+      console.log('Merge succeeded with qpdf');
+    } catch (qpdfErr) {
+      console.log(`qpdf merge failed: ${qpdfErr.message}`);
     }
-
-    if (!mergedWithPdfunite) {
-      // Ghostscript merge fallback
+    
+    // Try pdfunite if qpdf failed
+    if (!mergeSuccess) {
+      try {
+        await execFileAsync('pdfunite', [...inputPaths, outputPath]);
+        mergeSuccess = true;
+        console.log('Merge succeeded with pdfunite');
+      } catch (pdfuniteErr) {
+        console.log(`pdfunite failed: ${pdfuniteErr.message}`);
+      }
+    }
+    
+    // Last resort: ghostscript (can have issues with complex forms)
+    if (!mergeSuccess) {
+      console.log('Trying ghostscript as last resort...');
       const gsArgs = [
         '-dBATCH',
         '-dNOPAUSE',
