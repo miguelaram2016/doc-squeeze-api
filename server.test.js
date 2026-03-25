@@ -10,6 +10,8 @@ const {
   normalizeCompressionLevel,
   AppError,
   mergePdfFiles,
+  looksLikePdfHeader,
+  isInvalidPdfFailure,
 } = require('./server');
 
 const PDF_BUFFER = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF', 'utf8');
@@ -63,13 +65,23 @@ test('normalizeCompressionLevel validates supported values', () => {
   assert.throws(() => normalizeCompressionLevel('banana'), /Invalid compression level/);
 });
 
+test('looksLikePdfHeader detects PDF signatures and rejects obvious garbage', () => {
+  assert.equal(looksLikePdfHeader(Buffer.from('%PDF-1.7\nhello', 'utf8')), true);
+  assert.equal(looksLikePdfHeader(Buffer.from('not really a pdf', 'utf8')), false);
+});
+
+test('isInvalidPdfFailure classifies fatal qpdf parse failures but not recoverable warnings', () => {
+  assert.equal(isInvalidPdfFailure({ stderr: 'qpdf: unable to find trailer dictionary while recovering damaged file' }), true);
+  assert.equal(isInvalidPdfFailure({ stderr: 'WARNING: file is damaged' }), false);
+});
+
 test('split endpoint returns 400 for invalid ranges', async () => {
   const fsMock = createMemoryFs();
   const app = createApp({
     fs: fsMock,
     incrementCount: async () => {},
     execFileAsync: async (cmd, args) => {
-      if (cmd === 'qpdf' && args[0] === '--check') {
+      if (cmd === 'qpdf' && args.includes('--check')) {
         return { stdout: '', stderr: '' };
       }
       if (cmd === 'qpdf' && args[0] === '--show-npages') {
@@ -95,7 +107,7 @@ test('split endpoint hides raw qpdf failures', async () => {
     fs: fsMock,
     incrementCount: async () => {},
     execFileAsync: async (cmd, args) => {
-      if (cmd === 'qpdf' && args[0] === '--check') {
+      if (cmd === 'qpdf' && args.includes('--check')) {
         return { stdout: '', stderr: '' };
       }
       if (cmd === 'qpdf' && args[0] === '--show-npages') {
@@ -138,7 +150,7 @@ test('merge endpoint sends a PDF when qpdf merge succeeds', async () => {
     fs: fsMock,
     incrementCount: async () => {},
     execFileAsync: async (cmd, args) => {
-      if (cmd === 'qpdf' && args[0] === '--check') {
+      if (cmd === 'qpdf' && args.includes('--check')) {
         return { stdout: '', stderr: '' };
       }
       if (cmd === 'qpdf' && args[0] === '--empty') {
@@ -172,7 +184,7 @@ test('compress endpoint returns 400 for malformed PDFs before toolchain work', a
     fs: fsMock,
     incrementCount: async () => {},
     execFileAsync: async (cmd, args) => {
-      if (cmd === 'qpdf' && args[0] === '--check') {
+      if (cmd === 'qpdf' && args.includes('--check')) {
         throw INVALID_PDF_ERROR;
       }
       throw new Error(`unexpected command ${cmd} ${args.join(' ')}`);
@@ -188,13 +200,45 @@ test('compress endpoint returns 400 for malformed PDFs before toolchain work', a
   assert.equal(response.body.error, 'The uploaded file is not a valid PDF. Please export or print it as a standard PDF and try again.');
 });
 
+test('compress endpoint accepts PDFs that trigger qpdf warnings but still pass validation', async () => {
+  const fsMock = createMemoryFs();
+  const app = createApp({
+    fs: fsMock,
+    incrementCount: async () => {},
+    execFileAsync: async (cmd, args) => {
+      if (cmd === 'qpdf' && args.includes('--check')) {
+        assert.equal(args[0], '--warning-exit-0');
+        return { stdout: '', stderr: 'WARNING: file is damaged' };
+      }
+      if (cmd === 'qpdf' && args.includes('--compress-streams=y')) {
+        const outputPath = args[args.length - 1];
+        await fsMock.writeFile(outputPath, Buffer.from('%PDF-qpdf'));
+        return { stdout: '', stderr: '' };
+      }
+      if (cmd === 'gs') {
+        throw new Error('skip gs for test');
+      }
+      throw new Error(`unexpected command ${cmd} ${args.join(' ')}`);
+    },
+  });
+
+  const response = await request(app)
+    .post('/api/compress')
+    .field('level', 'medium')
+    .attach('file', PDF_BUFFER, { filename: 'repairable.pdf', contentType: 'application/pdf' });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.originalName, 'repairable.pdf');
+  assert.equal(Buffer.from(response.body.compressedBase64, 'base64').toString('utf8'), '%PDF-qpdf');
+});
+
 test('merge endpoint rejects malformed PDFs instead of silently succeeding via fallback', async () => {
   const fsMock = createMemoryFs();
   const app = createApp({
     fs: fsMock,
     incrementCount: async () => {},
     execFileAsync: async (cmd, args) => {
-      if (cmd === 'qpdf' && args[0] === '--check') {
+      if (cmd === 'qpdf' && args.includes('--check')) {
         throw INVALID_PDF_ERROR;
       }
       throw new Error(`unexpected command ${cmd} ${args.join(' ')}`);
@@ -209,3 +253,4 @@ test('merge endpoint rejects malformed PDFs instead of silently succeeding via f
   assert.equal(response.status, 400);
   assert.equal(response.body.error, 'The uploaded file is not a valid PDF. Please export or print it as a standard PDF and try again.');
 });
+

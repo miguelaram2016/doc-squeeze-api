@@ -386,18 +386,47 @@ async function mergePdfFiles(inputPaths, outputPath, files, tools) {
 }
 
 async function validatePdfFile(inputPath, tools) {
+  const header = await readPdfHeader(inputPath, tools.fs);
+  if (!looksLikePdfHeader(header)) {
+    throw invalidPdfError(new Error('Missing PDF header signature'));
+  }
+
   try {
-    await tools.execFileAsync('qpdf', ['--check', inputPath]);
+    await tools.execFileAsync('qpdf', ['--warning-exit-0', '--check', inputPath]);
+    return;
   } catch (err) {
-    const text = sanitizeToolFailure(err).toLowerCase();
-    if (text.includes('file is damaged') || text.includes('unable to find trailer dictionary') || text.includes('can\'t find startxref') || text.includes('not a pdf file')) {
-      throw new AppError(400, 'The uploaded file is not a valid PDF. Please export or print it as a standard PDF and try again.', {
-        code: 'INVALID_PDF',
-        cause: err,
-      });
+    if (isInvalidPdfFailure(err)) {
+      throw invalidPdfError(err);
     }
+
     throw mapToolError(err, 'validate');
   }
+}
+
+async function readPdfHeader(inputPath, fsModule = fs) {
+  const fileBuffer = await fsModule.readFile(inputPath);
+  return Buffer.isBuffer(fileBuffer) ? fileBuffer.subarray(0, 1024) : Buffer.from(fileBuffer).subarray(0, 1024);
+}
+
+function looksLikePdfHeader(buffer) {
+  return /%PDF-\d\.\d/.test(Buffer.from(buffer || '').toString('latin1'));
+}
+
+function isInvalidPdfFailure(err) {
+  const text = sanitizeToolFailure(err).toLowerCase();
+  return text.includes('unable to find trailer dictionary')
+    || text.includes("can't find startxref")
+    || text.includes('not a pdf file')
+    || text.includes('pdf header')
+    || text.includes('trailer')
+    || text.includes('xref');
+}
+
+function invalidPdfError(err) {
+  return new AppError(400, 'The uploaded file is not a valid PDF. Please export or print it as a standard PDF and try again.', {
+    code: 'INVALID_PDF',
+    cause: err,
+  });
 }
 
 async function getPdfPageCount(inputPath, tools) {
@@ -566,4 +595,6 @@ module.exports = {
   mergePdfFiles,
   getPdfPageCount,
   runQpdfPageSelection,
+  looksLikePdfHeader,
+  isInvalidPdfFailure,
 };
