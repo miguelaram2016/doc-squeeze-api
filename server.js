@@ -71,6 +71,7 @@ function createApp(deps = {}) {
 
     console.log(`Compressing: ${req.file.originalname}, ${req.file.size} bytes, level: ${level}`);
 
+    await validateUploadedPdf(req.file.buffer, req.file.originalname, tools);
     const result = await compressPdf(req.file.buffer, req.file.originalname, level, tools);
     await tools.incrementCount();
 
@@ -92,6 +93,7 @@ function createApp(deps = {}) {
     const results = [];
     for (const file of files) {
       try {
+        await validateUploadedPdf(file.buffer, file.originalname, tools);
         const result = await compressPdf(file.buffer, file.originalname, level, tools);
         results.push(result);
         await tools.incrementCount();
@@ -123,6 +125,7 @@ function createApp(deps = {}) {
       for (let i = 0; i < files.length; i += 1) {
         const inputPath = path.join(tmpDir, `input_${String(i).padStart(3, '0')}.pdf`);
         await tools.fs.writeFile(inputPath, files[i].buffer);
+        await validatePdfFile(inputPath, tools);
         inputPaths.push(inputPath);
       }
 
@@ -156,6 +159,7 @@ function createApp(deps = {}) {
       const inputPath = path.join(tmpDir, 'input.pdf');
       const outputPath = path.join(tmpDir, 'output.pdf');
       await tools.fs.writeFile(inputPath, file.buffer);
+      await validatePdfFile(inputPath, tools);
 
       const pageCount = await getPdfPageCount(inputPath, tools);
       let selections;
@@ -275,6 +279,14 @@ async function runGhostscriptRecompress(input, output, level, tools = { execFile
   await tools.execFileAsync('gs', gsArgs);
 }
 
+async function validateUploadedPdf(buffer, originalName, tools) {
+  return withTempDir(async (tmpDir) => {
+    const inputPath = path.join(tmpDir, originalName || 'input.pdf');
+    await tools.fs.writeFile(inputPath, buffer);
+    await validatePdfFile(inputPath, tools);
+  }, tools.fs);
+}
+
 async function compressPdf(buffer, originalName, level, tools) {
   return withTempDir(async (tmpDir) => {
     const inputPath = path.join(tmpDir, 'input.pdf');
@@ -371,6 +383,21 @@ async function mergePdfFiles(inputPaths, outputPath, files, tools) {
     code: 'MERGE_FAILED',
     cause: new Error(failures.join(' | ')),
   });
+}
+
+async function validatePdfFile(inputPath, tools) {
+  try {
+    await tools.execFileAsync('qpdf', ['--check', inputPath]);
+  } catch (err) {
+    const text = sanitizeToolFailure(err).toLowerCase();
+    if (text.includes('file is damaged') || text.includes('unable to find trailer dictionary') || text.includes('can\'t find startxref') || text.includes('not a pdf file')) {
+      throw new AppError(400, 'The uploaded file is not a valid PDF. Please export or print it as a standard PDF and try again.', {
+        code: 'INVALID_PDF',
+        cause: err,
+      });
+    }
+    throw mapToolError(err, 'validate');
+  }
 }
 
 async function getPdfPageCount(inputPath, tools) {

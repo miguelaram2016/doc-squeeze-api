@@ -8,6 +8,7 @@ Express API for PDF compression, merge, split, and usage stats.
 - Merge PDFs with `qpdf` first and `pdfunite` as fallback.
 - **Important:** if fillable/AcroForm PDFs are detected, Ghostscript is intentionally skipped for merge so form data is not flattened or corrupted by the fallback path.
 - Split PDFs with `qpdf` page selection.
+- Validate uploaded PDFs up front so malformed/minimal fake PDFs fail consistently instead of behaving differently per endpoint.
 - Return clean client-facing errors instead of raw tool output.
 
 ## Runtime dependencies
@@ -118,10 +119,12 @@ Example validation errors:
 ## Error handling
 
 The API intentionally does **not** expose raw `qpdf`, `ghostscript`, stack traces, or filesystem details to clients.
+Malformed PDFs are rejected early with HTTP 400 instead of falling through to inconsistent tool-specific behavior.
 
 Typical client-visible errors:
 - `Only PDF files are supported`
 - `File too large. Maximum size is 100MB.`
+- `The uploaded file is not a valid PDF. Please export or print it as a standard PDF and try again.`
 - `Unable to compress this PDF right now. Please try another file or try again later.`
 - `Unable to merge these PDFs right now. Please verify the files are valid PDFs and try again.`
 - `Unable to merge one or more fillable PDFs. Please flatten the form fields first or try different source files.`
