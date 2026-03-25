@@ -1,5 +1,6 @@
 const express = require('express');
 const multer = require('multer');
+const helmet = require('helmet');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs/promises');
@@ -8,35 +9,205 @@ const os = require('os');
 const cors = require('cors');
 
 const execFileAsync = promisify(execFile);
+const statsPath = '/tmp/stats.json';
+const VALID_COMPRESSION_LEVELS = new Set(['ultra', 'high', 'medium', 'low', 'minimal']);
 
-// Check if a command exists in PATH (for Linux/Render)
-async function commandExists(cmd) {
-  try {
-    await execFileAsync('which', [cmd]);
-    return true;
-  } catch {
-    return false;
+class AppError extends Error {
+  constructor(statusCode, message, options = {}) {
+    super(message);
+    this.name = 'AppError';
+    this.statusCode = statusCode;
+    this.publicMessage = options.publicMessage || message;
+    this.code = options.code || 'APP_ERROR';
+    this.cause = options.cause;
   }
 }
 
-const app = express();
-const upload = multer({ limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB limit
-const statsPath = '/tmp/stats.json';
+function createApp(deps = {}) {
+  const app = express();
+  const tools = {
+    execFileAsync: deps.execFileAsync || execFileAsync,
+    fs: deps.fs || fs,
+    incrementCount: deps.incrementCount || incrementCount,
+  };
 
-// ── Stats helpers ────────────────────────────────────────────────────────────
+  const upload = multer({
+    limits: { fileSize: 100 * 1024 * 1024, files: 50 },
+    fileFilter: (req, file, cb) => {
+      if (file.mimetype !== 'application/pdf') {
+        return cb(new AppError(400, 'Only PDF files are supported'));
+      }
+      cb(null, true);
+    },
+  });
 
-async function readStats() {
+  app.disable('x-powered-by');
+  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(cors({
+    origin: ['https://doc-squeeze.vercel.app', 'http://localhost:3000'],
+    methods: ['POST', 'GET', 'OPTIONS'],
+    credentials: true,
+  }));
+
+  app.get('/', (req, res) => {
+    res.json({ status: 'ok', service: 'doc-squeeze-api' });
+  });
+
+  app.get('/api/stats', async (req, res, next) => {
+    try {
+      const stats = await readStats(tools.fs);
+      res.json({ count: stats.count });
+    } catch (err) {
+      next(new AppError(500, 'Failed to read stats', { cause: err }));
+    }
+  });
+
+  app.post('/api/compress', upload.single('file'), asyncHandler(async (req, res) => {
+    const level = normalizeCompressionLevel(req.body.level);
+
+    if (!req.file) {
+      throw new AppError(400, 'No file provided');
+    }
+
+    console.log(`Compressing: ${req.file.originalname}, ${req.file.size} bytes, level: ${level}`);
+
+    const result = await compressPdf(req.file.buffer, req.file.originalname, level, tools);
+    await tools.incrementCount();
+
+    console.log(`Done. ${result.originalSize} → ${result.compressedSize} bytes (${Math.round((1 - result.compressedSize / result.originalSize) * 100)}% reduction)`);
+
+    res.json(result);
+  }));
+
+  app.post('/api/batch-compress', upload.array('files', 50), asyncHandler(async (req, res) => {
+    const level = normalizeCompressionLevel(req.body.level);
+    const files = req.files;
+
+    if (!files || files.length === 0) {
+      throw new AppError(400, 'No files provided');
+    }
+
+    console.log(`Batch processing ${files.length} file(s), level: ${level}`);
+
+    const results = [];
+    for (const file of files) {
+      try {
+        const result = await compressPdf(file.buffer, file.originalname, level, tools);
+        results.push(result);
+        await tools.incrementCount();
+      } catch (err) {
+        const mapped = mapToolError(err, 'compress');
+        console.error(`Error compressing ${file.originalname}:`, err.message);
+        results.push({
+          originalName: file.originalname,
+          originalSize: file.size,
+          error: mapped.publicMessage,
+        });
+      }
+    }
+
+    res.json({ files: results });
+  }));
+
+  app.post('/api/merge', upload.array('files', 20), asyncHandler(async (req, res) => {
+    const files = req.files;
+
+    if (!files || files.length < 2) {
+      throw new AppError(400, 'At least 2 PDF files are required to merge');
+    }
+
+    console.log(`Merging ${files.length} PDF file(s)`);
+
+    const result = await withTempDir(async (tmpDir) => {
+      const inputPaths = [];
+      for (let i = 0; i < files.length; i += 1) {
+        const inputPath = path.join(tmpDir, `input_${String(i).padStart(3, '0')}.pdf`);
+        await tools.fs.writeFile(inputPath, files[i].buffer);
+        inputPaths.push(inputPath);
+      }
+
+      const outputPath = path.join(tmpDir, 'merged.pdf');
+      await mergePdfFiles(inputPaths, outputPath, files, tools);
+      return tools.fs.readFile(outputPath);
+    }, tools.fs);
+
+    await tools.incrementCount();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="merged.pdf"');
+    res.send(result);
+  }));
+
+  app.post('/api/split', upload.single('file'), asyncHandler(async (req, res) => {
+    const file = req.file;
+    const mode = req.body.mode || 'by_pages';
+    const ranges = req.body.ranges || '';
+
+    if (!file) {
+      throw new AppError(400, 'No file provided');
+    }
+
+    if (!['by_pages', 'range'].includes(mode)) {
+      throw new AppError(400, 'Mode must be "by_pages" or "range"');
+    }
+
+    console.log(`Splitting file: ${file.originalname}, mode: ${mode}, ranges: ${ranges}`);
+
+    const result = await withTempDir(async (tmpDir) => {
+      const inputPath = path.join(tmpDir, 'input.pdf');
+      const outputPath = path.join(tmpDir, 'output.pdf');
+      await tools.fs.writeFile(inputPath, file.buffer);
+
+      const pageCount = await getPdfPageCount(inputPath, tools);
+      let selections;
+
+      if (mode === 'by_pages') {
+        selections = Array.from({ length: pageCount }, (_, index) => String(index + 1));
+      } else {
+        const parsedRanges = parseRanges(ranges);
+        validateRanges(parsedRanges, pageCount);
+        selections = buildPageSelections(parsedRanges);
+      }
+
+      await runQpdfPageSelection(inputPath, selections, outputPath, tools);
+      return tools.fs.readFile(outputPath);
+    }, tools.fs);
+
+    await tools.incrementCount();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="split.pdf"');
+    res.send(result);
+  }));
+
+  app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File too large. Maximum size is 100MB.' });
+      }
+      return res.status(400).json({ error: 'Invalid upload payload.' });
+    }
+
+    const mapped = mapToolError(err, req.path);
+    if (mapped.statusCode >= 500) {
+      console.error(`${req.method} ${req.path} failed:`, err);
+    }
+    res.status(mapped.statusCode).json({ error: mapped.publicMessage });
+  });
+
+  return app;
+}
+
+async function readStats(fsModule = fs) {
   try {
-    const data = await fs.readFile(statsPath, 'utf8');
+    const data = await fsModule.readFile(statsPath, 'utf8');
     return JSON.parse(data);
   } catch {
     return { count: 0, lastUpdated: null };
   }
 }
 
-async function writeStats(stats) {
+async function writeStats(stats, fsModule = fs) {
   stats.lastUpdated = new Date().toISOString();
-  await fs.writeFile(statsPath, JSON.stringify(stats, null, 2));
+  await fsModule.writeFile(statsPath, JSON.stringify(stats, null, 2));
 }
 
 async function incrementCount() {
@@ -45,79 +216,41 @@ async function incrementCount() {
   await writeStats(stats);
 }
 
-// ── CORS ─────────────────────────────────────────────────────────────────────
-
-app.use(cors({
-  origin: ['https://doc-squeeze.vercel.app', 'http://localhost:3000'],
-  methods: ['POST', 'GET', 'OPTIONS'],
-  credentials: true
-}));
-
-// ── Health check ─────────────────────────────────────────────────────────────
-
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'doc-squeeze-api' });
-});
-
-// ── Stats endpoint ───────────────────────────────────────────────────────────
-
-app.get('/api/stats', async (req, res) => {
-  try {
-    const stats = await readStats();
-    res.json({ count: stats.count });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to read stats' });
-  }
-});
-
-// ── PDF helpers ─────────────────────────────────────────────────────────────
-
-// qpdf with actual compression (recompress streams with zlib)
-async function runQpdfCompress(input, output, level = 'medium') {
+async function runQpdfCompress(input, output, level = 'medium', tools = { execFileAsync }) {
   const qpdfArgs = [
     '--compress-streams=y',
     '--compression-level=9',
     '--object-streams=generate',
   ];
-  
-  // Ultra mode: extra optimization
+
   if (level === 'ultra') {
-    qpdfArgs.push(
-      '--linearize',
-    );
+    qpdfArgs.push('--linearize');
   }
-  
+
   qpdfArgs.push(input, output);
-  await execFileAsync('qpdf', qpdfArgs);
+  await tools.execFileAsync('qpdf', qpdfArgs);
 }
 
-// Ghostscript compression - 5 levels with appropriate compression ratios
-async function runGhostscriptRecompress(input, output, level) {
-  // 5 levels: ultra (most compression) to minimal (best quality)
+async function runGhostscriptRecompress(input, output, level, tools = { execFileAsync }) {
   const settings = {
-    ultra: { dpi: 36, preset: '/screen', desc: 'Maximum compression' },
-    high: { dpi: 48, preset: '/ebook', desc: 'High compression' },
-    medium: { dpi: 72, preset: '/printer', desc: 'Balanced' },
-    low: { dpi: 96, preset: '/printer', desc: 'Low compression' },
-    minimal: { dpi: 150, preset: '/prepress', desc: 'Best quality' }
+    ultra: { dpi: 36, preset: '/screen' },
+    high: { dpi: 48, preset: '/ebook' },
+    medium: { dpi: 72, preset: '/printer' },
+    low: { dpi: 96, preset: '/printer' },
+    minimal: { dpi: 150, preset: '/prepress' },
   };
-  
+
   const cfg = settings[level] || settings.medium;
-  const dpi = cfg.dpi;
-  const preset = cfg.preset;
-  
-  // Build Ghostscript arguments
   const gsArgs = [
     '-sDEVICE=pdfwrite',
     '-dCompatibilityLevel=1.4',
     '-dNOPAUSE',
     '-dQUIET',
     '-dBATCH',
-    `-dPDFSETTINGS=${preset}`,
-    `-r${dpi}`,
+    `-dPDFSETTINGS=${cfg.preset}`,
+    `-r${cfg.dpi}`,
   ];
-  
-  // Add downsampling for all levels except minimal
+
   if (level !== 'minimal') {
     gsArgs.push(
       '-dDownsampleColorImages=true',
@@ -128,8 +261,7 @@ async function runGhostscriptRecompress(input, output, level) {
       '-dMonoImageDownsampleType=/Bicubic',
     );
   }
-  
-  // Ultra: extra aggressive JPEG compression
+
   if (level === 'ultra') {
     gsArgs.push(
       '-dAutoFilterColorImages=true',
@@ -138,50 +270,42 @@ async function runGhostscriptRecompress(input, output, level) {
       '-dGrayImageFilter=/DCTEncode',
     );
   }
-  
+
   gsArgs.push(`-sOutputFile=${output}`, input);
-  
-  await execFileAsync('gs', gsArgs);
+  await tools.execFileAsync('gs', gsArgs);
 }
 
-// Compress a PDF buffer — returns { buffer, size }
-// Tries qpdf compression, optionally also ghostscript, picks the smaller result
-async function compressPdf(buffer, originalName, level) {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docsqueeze-'));
-  try {
+async function compressPdf(buffer, originalName, level, tools) {
+  return withTempDir(async (tmpDir) => {
     const inputPath = path.join(tmpDir, 'input.pdf');
     const qpdfPath = path.join(tmpDir, 'qpdf.pdf');
     const gsPath = path.join(tmpDir, 'gs.pdf');
 
-    await fs.writeFile(inputPath, buffer);
+    await tools.fs.writeFile(inputPath, buffer);
 
-    // Step 1: qpdf recompress (always — this is the baseline compression)
-    await runQpdfCompress(inputPath, qpdfPath, level);
-    const qpdfResult = await fs.readFile(qpdfPath);
-    const qpdfSize = (await fs.stat(qpdfPath)).size;
+    try {
+      await runQpdfCompress(inputPath, qpdfPath, level, tools);
+    } catch (err) {
+      throw mapToolError(err, 'compress');
+    }
 
-    // Step 2: ghostscript for all levels (each level uses different quality settings)
+    const qpdfResult = await tools.fs.readFile(qpdfPath);
+    const qpdfSize = (await tools.fs.stat(qpdfPath)).size;
+
     let finalBuffer = qpdfResult;
     let finalSize = qpdfSize;
 
     try {
-      console.log(`Running ghostscript for ${originalName}, level=${level}, qpdfSize=${qpdfSize}`);
-      await runGhostscriptRecompress(qpdfPath, gsPath, level);
-      const gsSize = (await fs.stat(gsPath)).size;
-      console.log(`Ghostscript done: qpdfSize=${qpdfSize}, gsSize=${gsSize}`);
-      // Only use gs output if it's actually smaller than qpdf output
+      await runGhostscriptRecompress(qpdfPath, gsPath, level, tools);
+      const gsSize = (await tools.fs.stat(gsPath)).size;
       if (gsSize < qpdfSize) {
-        console.log(`Using ghostscript output (smaller)`);
-        finalBuffer = await fs.readFile(gsPath);
+        finalBuffer = await tools.fs.readFile(gsPath);
         finalSize = gsSize;
-      } else {
-        console.log(`Keeping qpdf output (ghostscript not smaller)`);
       }
-    } catch (gsErr) {
-      console.error(`Ghostscript FAILED for ${originalName}:`, gsErr.message);
+    } catch (err) {
+      console.error(`Ghostscript skipped for ${originalName}:`, err.message);
     }
 
-    // Safety: never return a file larger than the original
     if (finalSize >= buffer.length) {
       finalBuffer = qpdfResult;
       finalSize = qpdfSize;
@@ -193,327 +317,226 @@ async function compressPdf(buffer, originalName, level) {
       compressedSize: finalSize,
       compressedBase64: finalBuffer.toString('base64'),
     };
-  } finally {
-    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-  }
+  }, tools.fs);
 }
 
-// ── Single-file compress ──────────────────────────────────────────────────────
-
-app.post('/api/compress', upload.single('file'), async (req, res) => {
-  try {
-    const level = req.body.level || 'medium';
-
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file provided' });
-    }
-
-    if (req.file.mimetype !== 'application/pdf') {
-      return res.status(400).json({ error: 'Only PDF files are supported' });
-    }
-
-    console.log(`Compressing: ${req.file.originalname}, ${req.file.size} bytes, level: ${level}`);
-
-    const result = await compressPdf(req.file.buffer, req.file.originalname, level);
-    await incrementCount();
-
-    console.log(`Done. ${result.originalSize} → ${result.compressedSize} bytes (${Math.round((1 - result.compressedSize / result.originalSize) * 100)}% reduction)`);
-
-    // Return JSON (frontend decodes base64 and triggers download)
-    res.json({
-      originalName: result.originalName,
-      originalSize: result.originalSize,
-      compressedSize: result.compressedSize,
-      compressedBase64: result.compressedBase64,
-    });
-
-  } catch (err) {
-    console.error('Compression error:', err);
-    res.status(500).json({ error: err.message || 'Compression failed' });
-  }
-});
-
-// ── Batch compress ────────────────────────────────────────────────────────────
-
-app.post('/api/batch-compress', upload.array('files', 50), async (req, res) => {
-  try {
-    const level = req.body.level || 'medium';
-    const files = req.files;
-
-    if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'No files provided' });
-    }
-
-    const nonPdf = files.filter(f => f.mimetype !== 'application/pdf');
-    if (nonPdf.length > 0) {
-      return res.status(400).json({
-        error: 'Only PDF files are supported',
-        invalidFiles: nonPdf.map(f => f.originalname),
-      });
-    }
-
-    console.log(`Batch processing ${files.length} file(s), level: ${level}`);
-
-    const results = [];
-    for (const file of files) {
-      try {
-        const result = await compressPdf(file.buffer, file.originalname, level);
-        results.push(result);
-        await incrementCount();
-      } catch (err) {
-        console.error(`Error compressing ${file.originalname}:`, err.message);
-        results.push({
-          originalName: file.originalname,
-          originalSize: file.size,
-          error: err.message,
-        });
-      }
-    }
-
-    res.json({ files: results });
-
-  } catch (err) {
-    console.error('Batch compression error:', err);
-    res.status(500).json({
-      error: err.message || 'Batch compression failed',
-    });
-  }
-});
-
-// ── Merge PDFs ────────────────────────────────────────────────────────────────
-
-app.post('/api/merge', upload.array('files', 20), async (req, res) => {
-  let tmpDir = '';
-
-  try {
-    const files = req.files;
-
-    if (!files || files.length < 2) {
-      return res.status(400).json({ error: 'At least 2 PDF files are required to merge' });
-    }
-
-    const nonPdf = files.filter(f => f.mimetype !== 'application/pdf');
-    if (nonPdf.length > 0) {
-      return res.status(400).json({
-        error: 'Only PDF files are supported',
-        invalidFiles: nonPdf.map(f => f.originalname),
-      });
-    }
-
-    console.log(`Merging ${files.length} PDF file(s)`);
-
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docsqueeze-'));
-
-    // Write input files preserving order
-    const inputPaths = [];
-    for (let i = 0; i < files.length; i++) {
-      const inputPath = path.join(tmpDir, `input_${String(i).padStart(3, '0')}.pdf`);
-      await fs.writeFile(inputPath, files[i].buffer);
-      inputPaths.push(inputPath);
-    }
-
-    const outputPath = path.join(tmpDir, 'merged.pdf');
-
-    // Try qpdf first (most reliable), then pdfunite, then ghostscript
-    let mergeSuccess = false;
-    
-    // Try qpdf --pages (most reliable)
-    try {
-      await execFileAsync('qpdf', ['--pages', ...inputPaths, '--', outputPath]);
-      mergeSuccess = true;
-      console.log('Merge succeeded with qpdf');
-    } catch (qpdfErr) {
-      console.log(`qpdf merge failed: ${qpdfErr.message}`);
-    }
-    
-    // Try pdfunite if qpdf failed
-    if (!mergeSuccess) {
-      try {
-        await execFileAsync('pdfunite', [...inputPaths, outputPath]);
-        mergeSuccess = true;
-        console.log('Merge succeeded with pdfunite');
-      } catch (pdfuniteErr) {
-        console.log(`pdfunite failed: ${pdfuniteErr.message}`);
-      }
-    }
-    
-    // Last resort: ghostscript (can have issues with complex forms)
-    if (!mergeSuccess) {
-      console.log('Trying ghostscript as last resort...');
-      const gsArgs = [
+async function mergePdfFiles(inputPaths, outputPath, files, tools) {
+  const hasAcroForm = files.some((file) => isLikelyAcroFormPdf(file.buffer));
+  const mergeAttempts = [
+    {
+      tool: 'qpdf',
+      args: ['--empty', '--pages', ...inputPaths, '--', outputPath],
+      allowedWhenAcroForm: true,
+    },
+    {
+      tool: 'pdfunite',
+      args: [...inputPaths, outputPath],
+      allowedWhenAcroForm: true,
+    },
+    {
+      tool: 'gs',
+      args: [
         '-dBATCH',
         '-dNOPAUSE',
         '-q',
         '-sDEVICE=pdfwrite',
         `-sOutputFile=${outputPath}`,
         ...inputPaths,
-      ];
-      await execFileAsync('gs', gsArgs);
+      ],
+      allowedWhenAcroForm: false,
+    },
+  ];
+
+  const failures = [];
+
+  for (const attempt of mergeAttempts) {
+    if (hasAcroForm && !attempt.allowedWhenAcroForm) {
+      failures.push(`${attempt.tool} skipped because AcroForm content was detected`);
+      continue;
     }
 
-    const result = await fs.readFile(outputPath);
-    const stats = await fs.stat(outputPath);
-
-    await incrementCount();
-
-    console.log(`Merge complete. Output size: ${stats.size}`);
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename="merged.pdf"');
-    res.send(result);
-
-  } catch (err) {
-    console.error('Merge error:', err);
-    res.status(500).json({
-      error: err.message || 'Merge failed',
-      details: err.stack,
-    });
-  } finally {
-    if (tmpDir) {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    try {
+      await tools.execFileAsync(attempt.tool, attempt.args);
+      return attempt.tool;
+    } catch (err) {
+      failures.push(`${attempt.tool}: ${sanitizeToolFailure(err)}`);
     }
   }
-});
 
-// ── Split PDF ─────────────────────────────────────────────────────────────────
+  const publicMessage = hasAcroForm
+    ? 'Unable to merge one or more fillable PDFs. Please flatten the form fields first or try different source files.'
+    : 'Unable to merge these PDFs right now. Please verify the files are valid PDFs and try again.';
 
-app.post('/api/split', upload.single('file'), async (req, res) => {
-  let tmpDir = '';
+  throw new AppError(500, publicMessage, {
+    code: 'MERGE_FAILED',
+    cause: new Error(failures.join(' | ')),
+  });
+}
 
+async function getPdfPageCount(inputPath, tools) {
   try {
-    const file = req.file;
-    const mode = req.body.mode || 'by_pages';
-    const ranges = req.body.ranges || '';
-
-    if (!file) {
-      return res.status(400).json({ error: 'No file provided' });
+    const { stdout } = await tools.execFileAsync('qpdf', ['--show-npages', inputPath]);
+    const pageCount = Number.parseInt(String(stdout).trim(), 10);
+    if (!Number.isInteger(pageCount) || pageCount < 1) {
+      throw new Error('Invalid page count from qpdf');
     }
-
-    if (file.mimetype !== 'application/pdf') {
-      return res.status(400).json({ error: 'Only PDF files are supported' });
-    }
-
-    if (!['by_pages', 'range'].includes(mode)) {
-      return res.status(400).json({ error: 'Mode must be "by_pages" or "range"' });
-    }
-
-    if (mode === 'range' && !ranges) {
-      return res.status(400).json({ error: 'ranges parameter is required when mode is "range"' });
-    }
-
-    console.log(`Splitting file: ${file.originalname}, mode: ${mode}, ranges: ${ranges}`);
-
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'docsqueeze-'));
-    const inputPath = path.join(tmpDir, 'input.pdf');
-    const outputPath = path.join(tmpDir, 'output.pdf');
-
-    await fs.writeFile(inputPath, file.buffer);
-
-    if (mode === 'by_pages') {
-      // Split each page into its own PDF using qpdf
-      // Output: a multi-section PDF where each page is a separate section
-      // We use qpdf --split-pages to create page-per-file output
-      // qpdf --split-pages input.pdf will produce input.pdf.1, input.pdf.2, etc.
-      const splitPrefix = path.join(tmpDir, 'split_page');
-      await execFileAsync('qpdf', ['--split-pages', '--', inputPath, splitPrefix]);
-
-      // Read all generated page files and return them bundled
-      // Since we return a single file download, use qpdf --pages to reassemble
-      // the requested pages into one output
-      const pageFiles = await fs.readdir(tmpDir);
-      const pageFilesSorted = pageFiles
-        .filter(f => f.startsWith('split_page') && f.endsWith('.pdf'))
-        .sort();
-
-      if (pageFilesSorted.length === 0) {
-        throw new Error('No pages found in PDF (file may have 0 pages)');
-      }
-
-      // Reassemble all pages into a single output PDF
-      const splitPaths = pageFilesSorted.map(f => path.join(tmpDir, f));
-      await execFileAsync('qpdf', ['--pages', ...splitPaths, '--', inputPath, outputPath]);
-
-    } else {
-      // mode === 'range': parse ranges like "1-3,4,5-7"
-      const pageRanges = parseRanges(ranges);
-      if (pageRanges.length === 0) {
-        return res.status(400).json({ error: 'Invalid ranges format. Use like "1-3,4,5-7"' });
-      }
-
-      // Build qpdf page selection args
-      // qpdf --pages input.pdf 1-3 4 5-7 -- output.pdf
-      // We need to flatten all individual ranges into page selections
-      const allPages = [];
-      for (const r of pageRanges) {
-        if (r.start === r.end) {
-          allPages.push(String(r.start));
-        } else {
-          allPages.push(`${r.start}-${r.end}`);
-        }
-      }
-
-      await execFileAsync('qpdf', ['--pages', inputPath, ...allPages, '--', inputPath, outputPath]);
-    }
-
-    const result = await fs.readFile(outputPath);
-    const stats = await fs.stat(outputPath);
-
-    await incrementCount();
-
-    console.log(`Split complete. Output size: ${stats.size}`);
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename="split.pdf"');
-    res.send(result);
-
+    return pageCount;
   } catch (err) {
-    console.error('Split error:', err);
-    res.status(500).json({
-      error: err.message || 'Split failed',
-      details: err.stack,
-    });
-  } finally {
-    if (tmpDir) {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-    }
+    throw mapToolError(err, 'split');
   }
-});
+}
 
-// ── Range parser ──────────────────────────────────────────────────────────────
+async function runQpdfPageSelection(inputPath, selections, outputPath, tools) {
+  try {
+    await tools.execFileAsync('qpdf', ['--empty', '--pages', inputPath, ...selections, '--', outputPath]);
+  } catch (err) {
+    throw mapToolError(err, 'split');
+  }
+}
 
-/**
- * Parse comma-separated page ranges like "1-3,4,5-7" into [{start,end}, ...]
- * @param {string} rangesStr
- * @returns {{start: number, end: number}[]}
- */
 function parseRanges(rangesStr) {
-  const ranges = [];
-  const parts = rangesStr.split(',').map(s => s.trim()).filter(Boolean);
+  const parts = String(rangesStr || '').split(',').map((value) => value.trim()).filter(Boolean);
+  if (parts.length === 0) {
+    throw new AppError(400, 'Invalid ranges format. Use values like "1-3,5,7-9".');
+  }
 
-  for (const part of parts) {
-    // Match "n" or "n-m"
+  return parts.map((part) => {
     const single = part.match(/^(\d+)$/);
     const range = part.match(/^(\d+)-(\d+)$/);
 
     if (single) {
-      const n = parseInt(single[1], 10);
-      ranges.push({ start: n, end: n });
-    } else if (range) {
-      const start = parseInt(range[1], 10);
-      const end = parseInt(range[2], 10);
-      if (start > 0 && end > 0 && start <= end) {
-        ranges.push({ start, end });
+      const page = Number.parseInt(single[1], 10);
+      if (page < 1) {
+        throw new AppError(400, 'Page numbers must start at 1.');
       }
+      return { start: page, end: page };
     }
-    // Skip invalid parts silently (or could throw)
-  }
 
-  return ranges;
+    if (range) {
+      const start = Number.parseInt(range[1], 10);
+      const end = Number.parseInt(range[2], 10);
+      if (start < 1 || end < 1) {
+        throw new AppError(400, 'Page numbers must start at 1.');
+      }
+      if (start > end) {
+        throw new AppError(400, `Invalid range "${part}". Start page must be less than or equal to end page.`);
+      }
+      return { start, end };
+    }
+
+    throw new AppError(400, `Invalid range segment "${part}". Use values like "1-3,5,7-9".`);
+  });
 }
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+function validateRanges(ranges, pageCount) {
+  if (!Array.isArray(ranges) || ranges.length === 0) {
+    throw new AppError(400, 'At least one page range is required.');
+  }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`DocSqueeze API running on port ${PORT}`);
-});
+  for (const range of ranges) {
+    if (range.start > pageCount || range.end > pageCount) {
+      throw new AppError(400, `Page range ${range.start}-${range.end} exceeds this document's ${pageCount} page(s).`);
+    }
+  }
+}
+
+function buildPageSelections(ranges) {
+  return ranges.map((range) => (range.start === range.end ? String(range.start) : `${range.start}-${range.end}`));
+}
+
+function normalizeCompressionLevel(level) {
+  const normalized = String(level || 'medium').toLowerCase();
+  if (!VALID_COMPRESSION_LEVELS.has(normalized)) {
+    throw new AppError(400, 'Invalid compression level. Use one of: ultra, high, medium, low, minimal.');
+  }
+  return normalized;
+}
+
+function isLikelyAcroFormPdf(buffer) {
+  return /\/AcroForm\b/.test(buffer.toString('latin1'));
+}
+
+function sanitizeToolFailure(err) {
+  const stderr = String(err?.stderr || '').trim();
+  const stdout = String(err?.stdout || '').trim();
+  const message = String(err?.message || '').trim();
+  return stderr || stdout || message || 'tool execution failed';
+}
+
+function mapToolError(err, action) {
+  if (err instanceof AppError) {
+    return err;
+  }
+
+  const text = sanitizeToolFailure(err).toLowerCase();
+
+  if (text.includes('no such file') || text.includes('not recognized') || text.includes('enoent')) {
+    return new AppError(500, 'PDF processing tools are not available on this server.', {
+      code: 'TOOL_MISSING',
+      cause: err,
+    });
+  }
+
+  if (action === 'compress') {
+    return new AppError(500, 'Unable to compress this PDF right now. Please try another file or try again later.', {
+      code: 'COMPRESS_FAILED',
+      cause: err,
+    });
+  }
+
+  if (action === 'split' || String(action).includes('/split')) {
+    return new AppError(500, 'Unable to split this PDF right now. Please verify the file is a valid PDF and try again.', {
+      code: 'SPLIT_FAILED',
+      cause: err,
+    });
+  }
+
+  if (action === 'merge' || String(action).includes('/merge')) {
+    return new AppError(500, 'Unable to merge these PDFs right now. Please verify the files are valid PDFs and try again.', {
+      code: 'MERGE_FAILED',
+      cause: err,
+    });
+  }
+
+  return new AppError(500, 'Something went wrong while processing the PDF.', {
+    code: 'PDF_PROCESSING_FAILED',
+    cause: err,
+  });
+}
+
+async function withTempDir(fn, fsModule = fs) {
+  const tmpDir = await fsModule.mkdtemp(path.join(os.tmpdir(), 'docsqueeze-'));
+  try {
+    return await fn(tmpDir);
+  } finally {
+    await fsModule.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+const app = createApp();
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`DocSqueeze API running on port ${PORT}`);
+  });
+}
+
+module.exports = {
+  app,
+  createApp,
+  AppError,
+  parseRanges,
+  validateRanges,
+  buildPageSelections,
+  normalizeCompressionLevel,
+  isLikelyAcroFormPdf,
+  mapToolError,
+  mergePdfFiles,
+  getPdfPageCount,
+  runQpdfPageSelection,
+};
