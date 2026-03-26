@@ -421,13 +421,22 @@ function looksLikePdfHeader(buffer) {
 }
 
 function isInvalidPdfFailure(err) {
-  const text = sanitizeToolFailure(err).toLowerCase();
+  // qpdf --warning-exit-0 exits 0 for recoverable issues, 2 for fatal syntax errors.
+  // Use exit code as primary signal; fall back to truly fatal error messages.
+  const code = typeof err.code === 'number' ? err.code : null;
+  if (code !== null && code !== 0) {
+    // Exit code 2 = syntax error / unrecoverable corruption.
+    // Any other non-zero (e.g. 1, 3) means recoverable — let it through.
+    return code === 2;
+  }
+
+  const text = (sanitizeToolFailure(err) || '').toLowerCase();
+  // Only match unambiguous fatal phrases — NOT generic terms like 'trailer' or 'xref'
+  // which appear in qpdf's normal output for valid PDFs too.
   return text.includes('unable to find trailer dictionary')
     || text.includes("can't find startxref")
     || text.includes('not a pdf file')
-    || text.includes('pdf header')
-    || text.includes('trailer')
-    || text.includes('xref');
+    || text.includes('pdf header');
 }
 
 function invalidPdfError(err) {
