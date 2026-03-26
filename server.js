@@ -50,7 +50,15 @@ function createApp(deps = {}) {
   }));
 
   app.get('/', (req, res) => {
-    res.json({ status: 'ok', service: 'doc-squeeze-api' });
+    res.json({
+      status: 'ok',
+      service: 'doc-squeeze-api',
+      version: getRuntimeVersion(),
+    });
+  });
+
+  app.get('/api/version', (req, res) => {
+    res.json({ version: getRuntimeVersion() });
   });
 
   app.get('/api/stats', async (req, res, next) => {
@@ -571,6 +579,10 @@ async function withTempDir(fn, fsModule = fs) {
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+function getRuntimeVersion() {
+  return process.env.RENDER_GIT_COMMIT || process.env.RENDER_GIT_COMMIT_SHA || process.env.GIT_COMMIT || 'dev';
 }
 
 const app = createApp();
