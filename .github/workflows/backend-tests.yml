@@ -1,0 +1,49 @@
+name: Backend tests
+
+on:
+  pull_request:
+    paths:
+      - '**/*.js'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/backend-tests.yml'
+  push:
+    branches: [master]
+    paths:
+      - '**/*.js'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/backend-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 20 (matches the Docker image)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install native PDF processing tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf ghostscript poppler-utils
+
+      - name: Run unit and native integration tests
+        run: npm test
+
+      - name: Check server syntax
+        run: node --check server.js

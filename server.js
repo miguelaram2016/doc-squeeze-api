@@ -310,25 +310,29 @@ async function compressPdf(buffer, originalName, level, tools) {
     }
 
     const qpdfResult = await tools.fs.readFile(qpdfPath);
-    const qpdfSize = (await tools.fs.stat(qpdfPath)).size;
-
     let finalBuffer = qpdfResult;
-    let finalSize = qpdfSize;
+    let finalSize = qpdfResult.length;
 
-    try {
-      await runGhostscriptRecompress(qpdfPath, gsPath, level, tools);
-      const gsSize = (await tools.fs.stat(gsPath)).size;
-      if (gsSize < qpdfSize) {
-        finalBuffer = await tools.fs.readFile(gsPath);
-        finalSize = gsSize;
+    // Ghostscript may flatten interactive forms. Preserve form fields by
+    // using only the lossless qpdf pass when AcroForm content is detected.
+    if (!isLikelyAcroFormPdf(buffer)) {
+      try {
+        await runGhostscriptRecompress(qpdfPath, gsPath, level, tools);
+        const gsSize = (await tools.fs.stat(gsPath)).size;
+        if (gsSize < finalSize) {
+          finalBuffer = await tools.fs.readFile(gsPath);
+          finalSize = gsSize;
+        }
+      } catch (err) {
+        console.error('Ghostscript recompression unavailable:', err.message);
       }
-    } catch (err) {
-      console.error(`Ghostscript skipped for ${originalName}:`, err.message);
     }
 
+    // Already-optimized documents should never get larger just because
+    // qpdf/Ghostscript produced a bigger file.
     if (finalSize >= buffer.length) {
-      finalBuffer = qpdfResult;
-      finalSize = qpdfSize;
+      finalBuffer = buffer;
+      finalSize = buffer.length;
     }
 
     return {
