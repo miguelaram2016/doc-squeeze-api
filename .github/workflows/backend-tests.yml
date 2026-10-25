@@ -37,7 +37,12 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Run backend regression tests
+      - name: Install native PDF processing tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf ghostscript poppler-utils
+
+      - name: Run unit and native integration tests
         run: npm test
 
       - name: Check server syntax
