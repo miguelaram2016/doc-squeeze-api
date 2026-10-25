@@ -254,3 +254,50 @@ test('merge endpoint rejects malformed PDFs instead of silently succeeding via f
   assert.equal(response.body.error, 'The uploaded file is not a valid PDF. Please export or print it as a standard PDF and try again.');
 });
 
+
+test('compression skips Ghostscript for fillable PDFs', async () => {
+  const fsMock = createMemoryFs();
+  const calls = [];
+  const app = createApp({
+    fs: fsMock,
+    incrementCount: async () => {},
+    execFileAsync: async (cmd, args) => {
+      calls.push(cmd);
+      if (cmd === 'qpdf' && args.includes('--check')) return { stdout: '', stderr: '' };
+      if (cmd === 'qpdf' && args.includes('--compress-streams=y')) {
+        await fsMock.writeFile(args[args.length - 1], Buffer.from('%PDF-smaller'));
+        return { stdout: '', stderr: '' };
+      }
+      throw new Error('Unexpected command');
+    },
+  });
+  const response = await request(app)
+    .post('/api/compress')
+    .attach('file', ACROFORM_BUFFER, { filename: 'form.pdf', contentType: 'application/pdf' });
+  assert.equal(response.status, 200);
+  assert.equal(Buffer.from(response.body.compressedBase64, 'base64').toString(), '%PDF-smaller');
+  assert.equal(calls.includes('gs'), false);
+});
+
+test('compression keeps original bytes when qpdf output is larger', async () => {
+  const fsMock = createMemoryFs();
+  const app = createApp({
+    fs: fsMock,
+    incrementCount: async () => {},
+    execFileAsync: async (cmd, args) => {
+      if (cmd === 'qpdf' && args.includes('--check')) return { stdout: '', stderr: '' };
+      if (cmd === 'qpdf' && args.includes('--compress-streams=y')) {
+        await fsMock.writeFile(args[args.length - 1], Buffer.alloc(PDF_BUFFER.length + 20, 65));
+        return { stdout: '', stderr: '' };
+      }
+      if (cmd === 'gs') throw new Error('No benefit');
+      throw new Error('Unexpected command');
+    },
+  });
+  const response = await request(app)
+    .post('/api/compress')
+    .attach('file', PDF_BUFFER, { filename: 'already-small.pdf', contentType: 'application/pdf' });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.compressedSize, PDF_BUFFER.length);
+  assert.deepEqual(Buffer.from(response.body.compressedBase64, 'base64'), PDF_BUFFER);
+});
